@@ -1,84 +1,69 @@
 import express, { Request, Response, NextFunction } from 'express';
-import { config } from 'dotenv';
-import { handleChat } from './services/openai';
-// import { auth } from './config/firebase';
-// import { signInWithEmailAndPassword } from "firebase/auth";
-
-config();
-
-
-if (!process.env.PORT) {
-  console.warn('Warning: PORT not set in environment variables. Using default port 5000');
-}
-
-if (!process.env.OPENAI_API_KEY) {
-  console.error('Error: OPENAI_API_KEY not found in environment variables');
-  process.exit(1);
-}
+import { handleChat } from './services/gemini';
+import { config } from './config/config';
+import { handleError } from './utils/errorHandler';
+import { rateLimiter } from './services/rateLimiter';
 
 const app = express();
-const port = process.env.PORT || 5000;
+
+interface ChatRequest extends Request {
+  body: {
+    message: string;
+    userId?: string;
+  }
+}
 
 app.use(express.json());
 
+const validateChatRequest = (req: ChatRequest, res: Response, next: NextFunction) => {
+  const { message } = req.body;
+  if (!message || typeof message !== 'string') {
+    return res.status(400).json({ 
+      error: 'Bad Request',
+      message: 'Message is required and must be a string'
+    });
+  }
+  next();
+};
 
-app.get('/', (req,res) => {
+app.get('/', (_req, res) => {
   res.json({ status: 'Server is running' });
 });
-
-// chat end point
-app.post("/chat", (req:any,res:any) => {
+// @ts-ignore
+app.post("/chat", validateChatRequest, async (req: ChatRequest, res: Response) => {
   try {
-    const { message } = req.body;
+    const userId = req.body.userId || req.ip || 'default';
+    const response = await handleChat(req.body.message, userId);
     
-    if (!message) {
-      return res.status(400).json({ 
-        error: 'Message is required in request body' 
-      });
-    }
-
-    const response = handleChat(message);
-    return res.json({ response });
-
+    res.setHeader('X-RateLimit-Remaining', rateLimiter.getRemainingRequests(userId));
+    res.setHeader('X-RateLimit-Reset', rateLimiter.getResetTime(userId));
+    
+    return res.json({ 
+      response,
+      rateLimit: {
+        remaining: rateLimiter.getRemainingRequests(userId),
+        resetIn: Math.ceil(rateLimiter.getResetTime(userId) / 1000)
+      }
+    });
   } catch (error) {
-    console.error('Error in chat endpoint:', error);
-    return res.status(500).json({ 
-      error: 'Internal server error',
-      message: error instanceof Error ? error.message : 'Unknown error occurred'
+    const errorResponse = handleError(error);
+    
+    const userId = req.body.userId || req.ip || 'default';
+    res.setHeader('X-RateLimit-Remaining', rateLimiter.getRemainingRequests(userId));
+    res.setHeader('X-RateLimit-Reset', rateLimiter.getResetTime(userId));
+    
+    return res.status(errorResponse.statusCode).json({
+      ...errorResponse,
+      rateLimit: {
+        remaining: rateLimiter.getRemainingRequests(userId),
+        resetIn: Math.ceil(rateLimiter.getResetTime(userId) / 1000)
+      }
     });
   }
 });
 
-
-app.use((err: any, _req: any, res: any, _next: any) => {
-  console.error('Unhandled error:', err);
-  return res.status(500).json({ 
-    error: 'Internal server error',
-    message: err.message 
-  });
+const server = app.listen(config.port, () => {
+  console.log(`Server is running on port ${config.port}`);
 });
-
-const server = app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
-
-
-process.on('unhandledRejection', (error) => {
-  console.error('Unhandled Rejection:', error);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-  if (server) {
-    server.close(() => process.exit(1));
-  } else {
-    process.exit(1);
-  }
-});
-
-// app.post("/api/login" ,(req,res)=>{
-//   const {email, password} = req.body;
-//   signInWithEmailAndPassword(auth, email, password)
-// })
 
 export default app;
